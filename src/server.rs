@@ -1,4 +1,5 @@
 use crate::client::GitHubClient;
+use crate::git_local::GitLocal;
 use rmcp::{handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -79,6 +80,49 @@ pub struct CreateOrUpdateFileInput { pub owner: String, pub repo: String, pub pa
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListDirectoryInput { pub owner: String, pub repo: String, pub path: String, pub branch: Option<String> }
+
+// --- GitHub API: Repo lifecycle ---
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateRepositoryInput { pub name: String, pub description: Option<String>, #[serde(default)] pub private: bool, pub org: Option<String> }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ForkRepositoryInput { pub owner: String, pub repo: String }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteRepositoryInput { pub owner: String, pub repo: String }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListTagsInput { pub owner: String, pub repo: String }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateReleaseInput { pub owner: String, pub repo: String, pub tag_name: String, pub name: Option<String>, pub body: Option<String>, #[serde(default)] pub draft: bool, #[serde(default)] pub prerelease: bool }
+
+// --- Local git operations ---
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GitCloneInput { pub url: String, pub path: Option<String> }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GitInitInput { pub path: String }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GitStatusInput { pub path: String }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GitAddInput { pub path: String, #[serde(default = "default_dot")] pub files: Vec<String> }
+fn default_dot() -> Vec<String> { vec![".".to_string()] }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GitCommitInput { pub path: String, pub message: String }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GitPushInput { pub path: String, pub remote: Option<String>, pub branch: Option<String> }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GitTagInput { pub path: String, pub name: String, pub message: Option<String> }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GitLogInput { pub path: String, #[serde(default = "default_count")] pub count: u32 }
+fn default_count() -> u32 { 10 }
 
 #[derive(Clone)]
 pub struct GitHubServer {
@@ -307,6 +351,123 @@ impl GitHubServer {
                 let entries: Vec<serde_json::Value> = v.as_array().unwrap_or(&vec![]).iter().map(|e| serde_json::json!({"name": e["name"], "type": e["type"], "path": e["path"], "size": e["size"]})).collect();
                 serde_json::to_string_pretty(&entries).unwrap()
             }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    // --- GitHub API: Repo lifecycle ---
+
+    #[tool(description = "Create a new GitHub repository (personal or org)")]
+    async fn create_repository(&self, Parameters(i): Parameters<CreateRepositoryInput>) -> String {
+        let result = if let Some(org) = &i.org {
+            self.client.create_org_repository(org, &i.name, i.description.as_deref(), i.private).await
+        } else {
+            self.client.create_repository(&i.name, i.description.as_deref(), i.private).await
+        };
+        match result {
+            Ok(v) => serde_json::to_string_pretty(&serde_json::json!({"full_name": v["full_name"], "html_url": v["html_url"], "private": v["private"], "default_branch": v["default_branch"]})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Fork a repository to your account")]
+    async fn fork_repository(&self, Parameters(i): Parameters<ForkRepositoryInput>) -> String {
+        match self.client.fork_repository(&i.owner, &i.repo).await {
+            Ok(v) => serde_json::to_string_pretty(&serde_json::json!({"full_name": v["full_name"], "html_url": v["html_url"]})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Delete a repository (DANGEROUS — irreversible)")]
+    async fn delete_repository(&self, Parameters(i): Parameters<DeleteRepositoryInput>) -> String {
+        match self.client.delete_repository(&i.owner, &i.repo).await {
+            Ok(()) => serde_json::to_string_pretty(&serde_json::json!({"deleted": true, "repository": format!("{}/{}", i.owner, i.repo)})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "List tags for a repository")]
+    async fn list_tags(&self, Parameters(i): Parameters<ListTagsInput>) -> String {
+        match self.client.list_tags(&i.owner, &i.repo).await {
+            Ok(v) => {
+                let tags: Vec<serde_json::Value> = v.as_array().unwrap_or(&vec![]).iter().map(|t| serde_json::json!({"name": t["name"], "sha": t["commit"]["sha"]})).collect();
+                serde_json::to_string_pretty(&tags).unwrap()
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Create a GitHub release with tag, name, and body")]
+    async fn create_release(&self, Parameters(i): Parameters<CreateReleaseInput>) -> String {
+        match self.client.create_release(&i.owner, &i.repo, &i.tag_name, i.name.as_deref(), i.body.as_deref(), i.draft, i.prerelease).await {
+            Ok(v) => serde_json::to_string_pretty(&serde_json::json!({"id": v["id"], "tag_name": v["tag_name"], "html_url": v["html_url"], "draft": v["draft"]})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    // --- Local git operations ---
+
+    #[tool(description = "Clone a git repository to local filesystem")]
+    async fn git_clone(&self, Parameters(i): Parameters<GitCloneInput>) -> String {
+        match GitLocal::clone(&i.url, i.path.as_deref()) {
+            Ok(out) => serde_json::to_string_pretty(&serde_json::json!({"status": "cloned", "url": i.url, "output": out})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Initialize a new git repository")]
+    async fn git_init(&self, Parameters(i): Parameters<GitInitInput>) -> String {
+        match GitLocal::init(&i.path) {
+            Ok(out) => serde_json::to_string_pretty(&serde_json::json!({"status": "initialized", "path": i.path, "output": out})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Get git status of a repository")]
+    async fn git_status(&self, Parameters(i): Parameters<GitStatusInput>) -> String {
+        match GitLocal::status(&i.path) {
+            Ok(out) => serde_json::to_string_pretty(&serde_json::json!({"path": i.path, "status": out, "clean": out.is_empty()})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Stage files for commit (git add)")]
+    async fn git_add(&self, Parameters(i): Parameters<GitAddInput>) -> String {
+        let files: Vec<&str> = i.files.iter().map(|s| s.as_str()).collect();
+        match GitLocal::add(&i.path, &files) {
+            Ok(_) => serde_json::to_string_pretty(&serde_json::json!({"status": "staged", "files": i.files})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Create a git commit with a message")]
+    async fn git_commit(&self, Parameters(i): Parameters<GitCommitInput>) -> String {
+        match GitLocal::commit(&i.path, &i.message) {
+            Ok(out) => serde_json::to_string_pretty(&serde_json::json!({"status": "committed", "message": i.message, "output": out})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Push commits to remote")]
+    async fn git_push(&self, Parameters(i): Parameters<GitPushInput>) -> String {
+        match GitLocal::push(&i.path, i.remote.as_deref(), i.branch.as_deref()) {
+            Ok(out) => serde_json::to_string_pretty(&serde_json::json!({"status": "pushed", "output": out})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Create a git tag")]
+    async fn git_tag(&self, Parameters(i): Parameters<GitTagInput>) -> String {
+        match GitLocal::tag(&i.path, &i.name, i.message.as_deref()) {
+            Ok(_) => serde_json::to_string_pretty(&serde_json::json!({"status": "tagged", "tag": i.name})).unwrap(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Show git log (recent commits)")]
+    async fn git_log(&self, Parameters(i): Parameters<GitLogInput>) -> String {
+        match GitLocal::log(&i.path, i.count) {
+            Ok(out) => serde_json::to_string_pretty(&serde_json::json!({"path": i.path, "log": out})).unwrap(),
             Err(e) => format!("Error: {}", e),
         }
     }
