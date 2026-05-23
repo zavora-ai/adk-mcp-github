@@ -1,4 +1,5 @@
 mod client;
+mod git_local;
 mod server;
 mod types;
 

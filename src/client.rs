@@ -271,6 +271,42 @@ impl GitHubClient {
         let ref_param = branch.map(|b| format!("?ref={}", b)).unwrap_or_default();
         self.get(&format!("/repos/{}/{}/contents/{}{}", owner, repo, path, ref_param)).await
     }
+
+    pub async fn create_repository(&self, name: &str, description: Option<&str>, private: bool) -> Result<Value, String> {
+        let mut payload = serde_json::json!({"name": name, "private": private, "auto_init": true});
+        if let Some(d) = description { payload["description"] = serde_json::Value::String(d.to_string()); }
+        self.post("/user/repos", &payload).await
+    }
+
+    pub async fn create_org_repository(&self, org: &str, name: &str, description: Option<&str>, private: bool) -> Result<Value, String> {
+        let mut payload = serde_json::json!({"name": name, "private": private, "auto_init": true});
+        if let Some(d) = description { payload["description"] = serde_json::Value::String(d.to_string()); }
+        self.post(&format!("/orgs/{}/repos", org), &payload).await
+    }
+
+    pub async fn fork_repository(&self, owner: &str, repo: &str) -> Result<Value, String> {
+        self.post(&format!("/repos/{}/{}/forks", owner, repo), &serde_json::json!({})).await
+    }
+
+    pub async fn delete_repository(&self, owner: &str, repo: &str) -> Result<(), String> {
+        let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+        let resp = self.client.delete(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", "mcp-github/1.0")
+            .send().await.map_err(|e| e.to_string())?;
+        if resp.status().is_success() { Ok(()) } else { Err(format!("HTTP {}", resp.status())) }
+    }
+
+    pub async fn list_tags(&self, owner: &str, repo: &str) -> Result<Value, String> {
+        self.get(&format!("/repos/{}/{}/tags?per_page=20", owner, repo)).await
+    }
+
+    pub async fn create_release(&self, owner: &str, repo: &str, tag_name: &str, name: Option<&str>, body: Option<&str>, draft: bool, prerelease: bool) -> Result<Value, String> {
+        let mut payload = serde_json::json!({"tag_name": tag_name, "draft": draft, "prerelease": prerelease});
+        if let Some(n) = name { payload["name"] = serde_json::Value::String(n.to_string()); }
+        if let Some(b) = body { payload["body"] = serde_json::Value::String(b.to_string()); }
+        self.post(&format!("/repos/{}/{}/releases", owner, repo), &payload).await
+    }
 }
 
 fn base64_encode(data: &[u8]) -> String {
