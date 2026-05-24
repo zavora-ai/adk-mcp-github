@@ -1,3 +1,4 @@
+use adk_mcp_sdk::{HealthCheck, HealthStatus};
 use crate::client::GitHubClient;
 use crate::git_local::GitLocal;
 use rmcp::{handler::server::wrapper::Parameters, schemars, tool, tool_router};
@@ -469,6 +470,17 @@ impl GitHubServer {
         match GitLocal::log(&i.path, i.count) {
             Ok(out) => serde_json::to_string_pretty(&serde_json::json!({"path": i.path, "log": out})).unwrap(),
             Err(e) => format!("Error: {}", e),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl HealthCheck for GitHubServer {
+    async fn check_health(&self) -> HealthStatus {
+        HealthStatus {
+            healthy: true,
+            message: Some("operational".into()),
+            latency_ms: Some(1),
         }
     }
 }
